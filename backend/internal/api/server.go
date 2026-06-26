@@ -21,6 +21,7 @@ import (
 // it here (consumer-side) keeps handlers testable with a stub.
 type ClusterCollector interface {
 	CollectClusterSnapshot(ctx context.Context, clusterID string) analysis.ClusterSnapshot
+	CollectWorkloadSnapshot(ctx context.Context, clusterID, namespace string) analysis.WorkloadSnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -52,6 +53,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/clusters/{id}/health", s.handleClusterHealth)
+		r.Get("/clusters/{id}/workloads", s.handleWorkloads)
 	})
 
 	return r
@@ -99,6 +101,47 @@ func (s *Server) handleClusterHealth(w http.ResponseWriter, r *http.Request) {
 		zap.String("cluster_id", clusterID),
 		zap.Int("score", report.Score),
 		zap.String("status", string(report.Status)),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleWorkloads(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	// Optional namespace filter; empty means all namespaces.
+	namespace := r.URL.Query().Get("namespace")
+
+	start := time.Now()
+	snap := s.collector.CollectWorkloadSnapshot(r.Context(), clusterID, namespace)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("workload", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not list pods: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeWorkloads(snap)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("workload", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("workload", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("workloads analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.String("namespace", namespace),
+		zap.Int("pods", report.Summary.TotalPods),
+		zap.Int("findings", len(report.Findings)),
 		zap.Duration("duration", elapsed),
 	)
 

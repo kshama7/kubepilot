@@ -4,10 +4,10 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **Milestone 1 of 10** — project scaffold + Cluster Health analyzer.
-> Subsequent milestones add workload, resource, reliability, upgrade, GitOps,
-> security, and capacity analyzers, the Next.js dashboard, the AI explanation
-> layer, and production hardening.
+> Status: **Milestone 2 of 10** — Cluster Health + Workload analyzers.
+> Subsequent milestones add resource, reliability, upgrade, GitOps, security,
+> and capacity analyzers, the Next.js dashboard, the AI explanation layer, and
+> production hardening.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ rule engine is fully unit-tested without a cluster. See
 | Module          | Question it answers                                        | Status        |
 |-----------------|------------------------------------------------------------|---------------|
 | Cluster Health  | Is the control plane reachable and are nodes healthy?      | ✅ M1         |
-| Workload        | What's crashlooping, OOMKilled, pending, or restart-storming? | ⏳ later    |
+| Workload        | What's crashlooping, OOMKilled, pending, or restart-storming? | ✅ M2      |
 | Resource        | Where are we over-provisioned or missing requests/limits?  | ⏳ later       |
 | Reliability     | Do workloads have PDBs, probes, replicas, anti-affinity?   | ⏳ later       |
 | Upgrade         | Which deprecated/removed APIs block the next version?      | ⏳ later       |
@@ -69,6 +69,7 @@ cd backend && go run ./cmd/api
 # 2. Check it
 curl -s localhost:8080/healthz
 curl -s localhost:8080/api/v1/clusters/my-cluster/health | jq
+curl -s "localhost:8080/api/v1/clusters/my-cluster/workloads?namespace=default" | jq
 
 # 3. (optional) spin up a throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build

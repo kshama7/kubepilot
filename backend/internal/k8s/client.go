@@ -109,6 +109,85 @@ func (c *Client) CollectClusterSnapshot(ctx context.Context, clusterID string) a
 	return snap
 }
 
+// CollectWorkloadSnapshot lists pods (in the given namespace, or all namespaces
+// when namespace is "") and distills them into the structs the workload rules
+// evaluate. As with cluster health, an unreachable API server is recorded on
+// the snapshot rather than returned as an error.
+func (c *Client) CollectWorkloadSnapshot(ctx context.Context, clusterID, namespace string) analysis.WorkloadSnapshot {
+	snap := analysis.WorkloadSnapshot{
+		ClusterID:   clusterID,
+		Namespace:   namespace,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing pods failed",
+			zap.String("cluster_id", clusterID),
+			zap.String("namespace", namespace),
+			zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	snap.Pods = make([]analysis.PodStatus, 0, len(podList.Items))
+	for i := range podList.Items {
+		snap.Pods = append(snap.Pods, podStatusFrom(&podList.Items[i]))
+	}
+	return snap
+}
+
+// podStatusFrom distills a corev1.Pod into the workload scoring fields.
+func podStatusFrom(p *corev1.Pod) analysis.PodStatus {
+	ps := analysis.PodStatus{
+		Namespace: p.Namespace,
+		Name:      p.Name,
+		Phase:     string(p.Status.Phase),
+		NodeName:  p.Spec.NodeName,
+		Scheduled: true,
+		CreatedAt: p.CreationTimestamp.Time,
+	}
+
+	for _, cond := range p.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status != corev1.ConditionTrue {
+			ps.Scheduled = false
+			ps.UnschedulableReason = cond.Reason
+			ps.UnschedulableMessage = cond.Message
+		}
+	}
+
+	for i := range p.Status.InitContainerStatuses {
+		ps.Containers = append(ps.Containers, containerStateFrom(&p.Status.InitContainerStatuses[i], true))
+	}
+	for i := range p.Status.ContainerStatuses {
+		ps.Containers = append(ps.Containers, containerStateFrom(&p.Status.ContainerStatuses[i], false))
+	}
+	return ps
+}
+
+func containerStateFrom(cs *corev1.ContainerStatus, init bool) analysis.ContainerState {
+	out := analysis.ContainerState{
+		Name:         cs.Name,
+		Ready:        cs.Ready,
+		RestartCount: cs.RestartCount,
+		Init:         init,
+	}
+	if cs.Started != nil {
+		out.Started = *cs.Started
+	}
+	if cs.State.Waiting != nil {
+		out.WaitingReason = cs.State.Waiting.Reason
+		out.WaitingMessage = cs.State.Waiting.Message
+	}
+	if cs.LastTerminationState.Terminated != nil {
+		out.LastTerminatedReason = cs.LastTerminationState.Terminated.Reason
+		out.LastTerminatedExitCode = cs.LastTerminationState.Terminated.ExitCode
+	}
+	return out
+}
+
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.
 func nodeStatusFrom(n *corev1.Node) analysis.NodeStatus {
 	ns := analysis.NodeStatus{
