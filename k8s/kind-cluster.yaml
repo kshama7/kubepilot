@@ -1,0 +1,15 @@
+# kind cluster definition for KubePilot local development.
+#
+# apiServerAddress binds the control plane to all interfaces so the API server
+# is reachable both from the host (kubectl) and from the KubePilot container
+# (via host.docker.internal). One control-plane + two workers gives the
+# cluster-health analyzer real multi-node conditions to score.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kubepilot-dev
+networking:
+  apiServerAddress: "0.0.0.0"
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

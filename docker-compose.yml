@@ -1,0 +1,34 @@
+# KubePilot local development stack.
+#
+# Brings up the Go API. It analyzes whatever cluster your kubeconfig points at.
+# For a throwaway local cluster, run `scripts/kind-up.sh` first (requires kind);
+# it creates a kind cluster whose API server is reachable from this container
+# via host.docker.internal.
+services:
+  api:
+    build:
+      context: ./backend
+      args:
+        VERSION: ${KUBEPILOT_VERSION:-dev-compose}
+    ports:
+      - "8080:8080"
+    environment:
+      KUBEPILOT_ADDR: ":8080"
+      KUBEPILOT_LOG_FORMAT: ${KUBEPILOT_LOG_FORMAT:-json}
+      KUBEPILOT_LOG_LEVEL: ${KUBEPILOT_LOG_LEVEL:-info}
+      # Path is inside the container; see the volume mount below.
+      KUBEPILOT_KUBECONFIG: /home/nonroot/.kube/config
+    volumes:
+      # Mount the kind-flavored kubeconfig written by scripts/kind-up.sh.
+      # Falls back gracefully (analysis endpoints return 503) if absent.
+      - ${KUBEPILOT_KUBECONFIG_HOST:-./.kube/config}:/home/nonroot/.kube/config:ro
+    extra_hosts:
+      # Lets the container reach a host-local kind/minikube API server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/kubepilot-api", "--healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped

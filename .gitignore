@@ -1,0 +1,24 @@
+# Local cluster kubeconfig written by scripts/kind-up.sh
+/.kube/
+
+# Go build output
+/backend/bin/
+/backend/kubepilot-api
+*.out
+*.test
+
+# Node / Next.js (frontend, added in a later milestone)
+node_modules/
+.next/
+out/
+
+# Env and secrets
+.env
+.env.local
+*.local
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
