@@ -192,6 +192,26 @@ cluster's reported version. Version parsing tolerates distro suffixes
 (`1.27.3-gke.100`, `1.28.2+k3s1`). `upgradeSafe` is true when no *removed* API is
 in use for the target — deprecations alone don't block an upgrade.
 
+## GitOps analysis (M6)
+
+`analysis.AnalyzeGitOps` evaluates ArgoCD `Application` custom resources for
+drift and sync failures. Applications are read via the dynamic client (see
+[tradeoffs](tradeoffs.md) for why not the argo-cd Go module); absence of the CRD
+is reported as `argoCdInstalled: false`, never an error.
+
+| Issue type             | Detection rule                                              | Severity |
+|------------------------|------------------------------------------------------------|----------|
+| `SyncFailed`           | `operationState.phase` is Failed/Error                     | critical |
+| `ApplicationDegraded`  | `health.status` is Degraded                                | critical |
+| `OutOfSync`            | `sync.status` is OutOfSync (lists drifted resources)       | warning  |
+| `HealthMissing`        | `health.status` is Missing (warn) or Unknown (info)        | warning/info |
+| `ApplicationCondition` | a `status.conditions` entry of type `*Error`/`*Warning`    | warning/info |
+
+The `OutOfSync` finding enumerates exactly which managed resources drifted (from
+`status.resources`), so the report points at the offending object, not just the
+app. A failed sync operation is treated as the most urgent signal — the desired
+state did not apply, so the cluster is silently diverging from Git.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -214,6 +234,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/resources`   | Run the Resource analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/reliability` | Run the Reliability analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/upgrade`     | Run the Upgrade Readiness analyzer (`?target=1.25` optional) |
+| GET    | `/api/v1/clusters/{id}/gitops`      | Run the GitOps (ArgoCD) analyzer (`?namespace=` optional) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns

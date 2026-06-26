@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -24,6 +25,13 @@ import (
 
 	"github.com/kshama7/kubepilot/backend/internal/analysis"
 )
+
+// argoApplicationGVR is the ArgoCD Application custom resource. KubePilot reads
+// it via the dynamic client rather than vendoring the (very heavy) argo-cd Go
+// module — see docs/tradeoffs.md.
+var argoApplicationGVR = schema.GroupVersionResource{
+	Group: "argoproj.io", Version: "v1alpha1", Resource: "applications",
+}
 
 // Client is a thin, logged wrapper over a Kubernetes clientset.
 //
@@ -527,6 +535,92 @@ func (c *Client) countInstances(ctx context.Context, gvr schema.GroupVersionReso
 		return 0, false
 	}
 	return len(list.Items), true
+}
+
+// CollectGitOpsSnapshot lists ArgoCD Application custom resources (in the given
+// namespace, or cluster-wide when namespace is "") via the dynamic client. When
+// the Application CRD is not installed the snapshot reports ArgoCDInstalled=false
+// rather than treating it as an error — most clusters do not run ArgoCD.
+func (c *Client) CollectGitOpsSnapshot(ctx context.Context, clusterID, namespace string) analysis.GitOpsSnapshot {
+	snap := analysis.GitOpsSnapshot{
+		ClusterID:   clusterID,
+		Namespace:   namespace,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	// Confirm reachability first so we can distinguish "cluster down" from
+	// "ArgoCD not installed".
+	if _, err := c.clientset.Discovery().ServerVersion(); err != nil {
+		c.log.Warn("api server unreachable", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	if c.dynamic == nil {
+		return snap
+	}
+	list, err := c.dynamic.Resource(argoApplicationGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// A 404 (CRD absent) or forbidden means no ArgoCD data to analyze.
+		c.log.Info("ArgoCD Applications not listable; treating as not installed",
+			zap.String("cluster_id", clusterID), zap.Error(err))
+		return snap
+	}
+	snap.ArgoCDInstalled = true
+
+	snap.Applications = make([]analysis.ArgoApplication, 0, len(list.Items))
+	for i := range list.Items {
+		snap.Applications = append(snap.Applications, argoApplicationFrom(&list.Items[i]))
+	}
+	return snap
+}
+
+// argoApplicationFrom distills an unstructured ArgoCD Application into the
+// scoring-relevant fields, tolerating any missing status sub-objects.
+func argoApplicationFrom(u *unstructured.Unstructured) analysis.ArgoApplication {
+	app := analysis.ArgoApplication{
+		Namespace: u.GetNamespace(),
+		Name:      u.GetName(),
+	}
+	app.Project, _, _ = unstructured.NestedString(u.Object, "spec", "project")
+	app.SyncStatus, _, _ = unstructured.NestedString(u.Object, "status", "sync", "status")
+	app.HealthStatus, _, _ = unstructured.NestedString(u.Object, "status", "health", "status")
+	app.OperationPhase, _, _ = unstructured.NestedString(u.Object, "status", "operationState", "phase")
+	app.OperationMessage, _, _ = unstructured.NestedString(u.Object, "status", "operationState", "message")
+
+	if conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
+		for _, c := range conds {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _, _ := unstructured.NestedString(cm, "type")
+			msg, _, _ := unstructured.NestedString(cm, "message")
+			if t != "" {
+				app.Conditions = append(app.Conditions, analysis.AppCondition{Type: t, Message: msg})
+			}
+		}
+	}
+
+	if resources, found, _ := unstructured.NestedSlice(u.Object, "status", "resources"); found {
+		for _, r := range resources {
+			rm, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			rs := analysis.AppResourceStatus{}
+			rs.Group, _, _ = unstructured.NestedString(rm, "group")
+			rs.Kind, _, _ = unstructured.NestedString(rm, "kind")
+			rs.Namespace, _, _ = unstructured.NestedString(rm, "namespace")
+			rs.Name, _, _ = unstructured.NestedString(rm, "name")
+			rs.SyncStatus, _, _ = unstructured.NestedString(rm, "status")
+			rs.HealthStatus, _, _ = unstructured.NestedString(rm, "health", "status")
+			app.Resources = append(app.Resources, rs)
+		}
+	}
+	return app
 }
 
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.

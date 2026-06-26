@@ -4,9 +4,9 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **Milestone 5 of 10** — Cluster Health + Workload + Resource +
-> Reliability + Upgrade Readiness analyzers. Subsequent milestones add GitOps,
-> security, and capacity analyzers, the Next.js dashboard, the AI explanation
+> Status: **Milestone 6 of 10** — Cluster Health + Workload + Resource +
+> Reliability + Upgrade Readiness + GitOps analyzers. Subsequent milestones add
+> security and capacity analyzers, the Next.js dashboard, the AI explanation
 > layer, and production hardening.
 
 ## Architecture
@@ -32,7 +32,7 @@ rule engine is fully unit-tested without a cluster. See
 | Resource        | Where are we over-provisioned or missing requests/limits?  | ✅ M3          |
 | Reliability     | Do workloads have PDBs, probes, replicas, anti-affinity?   | ✅ M4          |
 | Upgrade         | Which deprecated/removed APIs block the next version?      | ✅ M5          |
-| GitOps          | What's drifted or out-of-sync in ArgoCD?                   | ⏳ later       |
+| GitOps          | What's drifted or out-of-sync in ArgoCD?                   | ✅ M6          |
 | Security        | Privileged containers, missing contexts, secrets in env?   | ⏳ later       |
 | Capacity        | Node utilization trends and saturation prediction          | ⏳ later       |
 
@@ -73,6 +73,7 @@ curl -s "localhost:8080/api/v1/clusters/my-cluster/workloads?namespace=default" 
 curl -s "localhost:8080/api/v1/clusters/my-cluster/resources?namespace=default" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/reliability?namespace=default" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/upgrade?target=1.25" | jq
+curl -s "localhost:8080/api/v1/clusters/my-cluster/gitops" | jq
 
 # 3. (optional) spin up a throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build
