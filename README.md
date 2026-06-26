@@ -4,10 +4,10 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **complete** — all 10 build milestones done: eight deterministic
-> analyzers, the AI explanation layer, and production hardening (Helm,
-> Prometheus/Grafana, OpenTelemetry, CI). The Next.js dashboard is the next
-> surface — see [docs/roadmap.md](docs/roadmap.md).
+> Status: **complete** — all 10 build milestones plus the Next.js dashboard:
+> eight deterministic analyzers, the AI explanation layer, production hardening
+> (Helm, Prometheus/Grafana, OpenTelemetry, CI), and a dark terminal-style
+> frontend over the API. See [docs/roadmap.md](docs/roadmap.md) for what's next.
 
 ## Architecture
 
@@ -100,6 +100,9 @@ curl -s "localhost:8080/api/v1/clusters/my-cluster/explain?analyzer=workload&nam
 
 # 4. (optional) full observability stack — Prometheus + Grafana dashboard
 docker compose --profile observability up   # Grafana → localhost:3000 (admin/admin)
+
+# 5. (optional) the dashboard — dark terminal-style UI over the API
+cd frontend && npm install && npm run dev    # → localhost:3000, proxies to the API
 ```
 
 Tests: `cd backend && go test ./...` · Deploy in-cluster: `helm install kubepilot ./helm/kubepilot`
@@ -126,6 +129,7 @@ More in [docs/interview-guide.md](docs/interview-guide.md) and
 ```
 kubepilot/
 ├── backend/          Go API: cmd/api, internal/{analysis,k8s,api,ai,metrics,observability,config}
+├── frontend/         Next.js 14 + TS + Tailwind dashboard (dark terminal aesthetic)
 ├── helm/kubepilot/   Helm chart (read-only RBAC, ServiceMonitor, hardened security context)
 ├── observability/    Prometheus config + Grafana datasource/dashboard provisioning
 ├── k8s/              kind cluster config
