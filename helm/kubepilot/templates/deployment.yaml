@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubepilot.fullname" . }}
+  labels:
+    {{- include "kubepilot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kubepilot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubepilot.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "kubepilot.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: []
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: KUBEPILOT_ADDR
+              value: ":8080"
+            - name: KUBEPILOT_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: KUBEPILOT_LOG_FORMAT
+              value: {{ .Values.config.logFormat | quote }}
+            {{- with .Values.config.prometheusUrl }}
+            - name: KUBEPILOT_PROMETHEUS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.otelEndpoint }}
+            - name: KUBEPILOT_OTEL_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: KUBEPILOT_AI_MODEL
+              value: {{ .Values.ai.model | quote }}
+            {{- with .Values.ai.existingSecret }}
+            - name: KUBEPILOT_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

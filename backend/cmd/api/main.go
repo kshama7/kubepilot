@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
 	"github.com/kshama7/kubepilot/backend/internal/ai"
@@ -25,6 +26,7 @@ import (
 	"github.com/kshama7/kubepilot/backend/internal/config"
 	"github.com/kshama7/kubepilot/backend/internal/k8s"
 	"github.com/kshama7/kubepilot/backend/internal/metrics"
+	"github.com/kshama7/kubepilot/backend/internal/observability"
 )
 
 // version is overridable at build time via -ldflags "-X main.version=...".
@@ -89,6 +91,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Optional distributed tracing. No-op when KUBEPILOT_OTEL_ENDPOINT is unset.
+	shutdownTracer, err := observability.InitTracer(ctx, observability.Config{
+		Endpoint:    cfg.Tracing.Endpoint,
+		Insecure:    cfg.Tracing.Insecure,
+		ServiceName: "kubepilot-api",
+		Version:     version,
+	})
+	if err != nil {
+		logger.Warn("tracing disabled: failed to initialize exporter", zap.Error(err))
+	} else if cfg.Tracing.Endpoint != "" {
+		logger.Info("tracing enabled", zap.String("otlp_endpoint", cfg.Tracing.Endpoint))
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
+
 	m := metrics.New()
 
 	// A missing/unreachable cluster at boot is non-fatal: the API still serves
@@ -121,9 +141,12 @@ func run() error {
 	}
 
 	srv := api.NewServer(logger.Named("http"), m, collector, explainer, version)
+	// otelhttp turns every request — i.e. every analysis run — into a traceable
+	// span; the API middleware enriches it with route/cluster/analyzer attributes.
+	handler := otelhttp.NewHandler(srv.Router(), "kubepilot-api")
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           srv.Router(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

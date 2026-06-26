@@ -35,6 +35,16 @@ type Config struct {
 	// empty the explain endpoint returns 503; all deterministic analysis is
 	// unaffected.
 	AI AIConfig
+
+	// Tracing configures the optional OpenTelemetry exporter. When Endpoint is
+	// empty, tracing is a no-op.
+	Tracing TracingConfig
+}
+
+// TracingConfig holds the OpenTelemetry OTLP settings.
+type TracingConfig struct {
+	Endpoint string
+	Insecure bool
 }
 
 // AIConfig holds the Claude API settings for the explanation layer.
@@ -81,7 +91,20 @@ func Load() Config {
 			Model:     env("KUBEPILOT_AI_MODEL", "claude-opus-4-8"),
 			MaxTokens: int64(envInt("KUBEPILOT_AI_MAX_TOKENS", 1024)),
 		},
+		Tracing: TracingConfig{
+			Endpoint: os.Getenv("KUBEPILOT_OTEL_ENDPOINT"),
+			Insecure: envBool("KUBEPILOT_OTEL_INSECURE", true),
+		},
 	}
+}
+
+func envBool(key string, def bool) bool {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
 }
 
 func envFloat(key string, def float64) float64 {

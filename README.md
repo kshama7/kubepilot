@@ -4,23 +4,34 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **Milestone 9 of 10** — all eight analyzers plus the AI explanation
-> layer (Claude explains deterministic findings, never generates them). The final
-> milestone is production hardening (Helm, full Prom/Grafana/OTel, CI, dashboard).
+> Status: **complete** — all 10 build milestones done: eight deterministic
+> analyzers, the AI explanation layer, and production hardening (Helm,
+> Prometheus/Grafana, OpenTelemetry, CI). The Next.js dashboard is the next
+> surface — see [docs/roadmap.md](docs/roadmap.md).
 
 ## Architecture
 
 ```
-Next.js dashboard  ──HTTP──▶  Go REST API (chi)  ──▶  Analysis engine (pure rules)
-                                   │                          │
-                                   ├─ Zap structured logs     ├─ Cluster Health (M1)
-                                   ├─ Prometheus /metrics      └─ … later milestones
-                                   └─ collect via client-go ──▶  Kubernetes API
+            Go REST API (chi, OpenTelemetry-traced)
+                 │
+   ┌─────────────┼──────────────────────────────┐
+   │             │                               │
+ Zap logs   Prometheus /metrics          Analysis engine (pure rules)
+                                                 │
+   ┌─────────────────────────────────────────────┴───────────────┐
+   │   collect (internal/k8s)            score (internal/analysis)│
+   │   client-go · metrics-server ·      8 deterministic analyzers│
+   │   dynamic client · Prometheus                                │
+   └──────────────────────────┬───────────────────────────────────┘
+                              │
+                     AI explanation layer (Claude, post-analysis only)
 ```
 
 Collection (I/O) and scoring (pure functions) are separate packages, so the
 rule engine is fully unit-tested without a cluster. See
-[docs/architecture.md](docs/architecture.md).
+[docs/architecture.md](docs/architecture.md),
+[docs/analysis-pipeline.md](docs/analysis-pipeline.md), and
+[docs/rule-engine.md](docs/rule-engine.md).
 
 ## Supported analyses
 
@@ -34,6 +45,12 @@ rule engine is fully unit-tested without a cluster. See
 | GitOps          | What's drifted or out-of-sync in ArgoCD?                   | ✅ M6          |
 | Security        | Privileged containers, missing contexts, secrets in env?   | ✅ M7          |
 | Capacity        | Node utilization trends and saturation prediction          | ✅ M8          |
+| AI explanation  | Plain-English explanation + remediation over the above     | ✅ M9          |
+
+All analyzers share one finding model (type · severity · resource · message) and
+are exposed at `GET /api/v1/clusters/{id}/<analyzer>`. The AI layer is
+`?analyzer=<name>` on `/explain`. Full endpoint table in
+[docs/architecture.md](docs/architecture.md).
 
 ## Cluster Health scoring
 
@@ -80,9 +97,12 @@ curl -s "localhost:8080/api/v1/clusters/my-cluster/explain?analyzer=workload&nam
 
 # 3. (optional) spin up a throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build
+
+# 4. (optional) full observability stack — Prometheus + Grafana dashboard
+docker compose --profile observability up   # Grafana → localhost:3000 (admin/admin)
 ```
 
-Tests: `cd backend && go test ./...`
+Tests: `cd backend && go test ./...` · Deploy in-cluster: `helm install kubepilot ./helm/kubepilot`
 
 ## Interview talking points
 
@@ -98,16 +118,20 @@ Tests: `cd backend && go test ./...`
 - **Weights encode on-call priority.** Cordon ≠ outage; the weighting reflects
   what actually pages someone.
 
+More in [docs/interview-guide.md](docs/interview-guide.md) and
+[docs/tradeoffs.md](docs/tradeoffs.md).
+
 ## Repo layout
 
 ```
 kubepilot/
-├── backend/          Go API (cmd/api, internal/{analysis,k8s,api,metrics,config})
-├── frontend/         Next.js dashboard            (later milestone)
-├── helm/ k8s/        deploy manifests + kind config
-├── terraform/        cloud infra                  (later milestone)
-├── docs/             architecture & design notes
+├── backend/          Go API: cmd/api, internal/{analysis,k8s,api,ai,metrics,observability,config}
+├── helm/kubepilot/   Helm chart (read-only RBAC, ServiceMonitor, hardened security context)
+├── observability/    Prometheus config + Grafana datasource/dashboard provisioning
+├── k8s/              kind cluster config
+├── docs/             architecture, analysis-pipeline, rule-engine, tradeoffs, interview-guide, roadmap
 ├── scripts/          kind-up.sh / kind-down.sh
+├── .github/workflows ci.yml (build · vet · test -race · helm lint · docker build)
 └── docker-compose.yml
 ```
 

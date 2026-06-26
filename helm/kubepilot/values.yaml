@@ -1,0 +1,64 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kshama7/kubepilot
+  tag: ""          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+# In-cluster RBAC: KubePilot reads (never mutates) cluster state.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Prometheus Operator ServiceMonitor. Enable if kube-prometheus-stack is present.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+config:
+  logLevel: info
+  logFormat: json
+  # Capacity planning: point at your in-cluster Prometheus to enable utilization
+  # trends and saturation prediction. Empty = density/commitment only.
+  prometheusUrl: ""
+  # Distributed tracing: OTLP/gRPC collector endpoint. Empty = tracing disabled.
+  otelEndpoint: ""
+
+# AI explanation layer. Provide the key via an existing secret to avoid putting
+# it in values. Leave both empty to run without AI (explain endpoint returns 503).
+ai:
+  existingSecret: ""        # secret containing key ANTHROPIC_API_KEY
+  model: claude-opus-4-8
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# Hardened pod/container security context (matches what the security analyzer
+# would want to see).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

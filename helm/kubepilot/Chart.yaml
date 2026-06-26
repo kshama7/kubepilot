@@ -1,0 +1,16 @@
+apiVersion: v2
+name: kubepilot
+description: KubePilot — a Kubernetes reliability platform with deterministic, rule-based analysis
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - reliability
+  - sre
+  - observability
+home: https://github.com/kshama7/kubepilot
+sources:
+  - https://github.com/kshama7/kubepilot
+maintainers:
+  - name: kshama7

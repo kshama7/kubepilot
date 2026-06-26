@@ -1,0 +1,45 @@
+{{- if .Values.rbac.create -}}
+# Read-only access. KubePilot inspects cluster state and never mutates it, so the
+# verbs are limited to get/list/watch across the resources the analyzers read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubepilot.fullname" . }}
+  labels:
+    {{- include "kubepilot.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+  # Discovery for the upgrade analyzer's deprecated-API scan.
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubepilot.fullname" . }}
+  labels:
+    {{- include "kubepilot.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubepilot.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubepilot.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

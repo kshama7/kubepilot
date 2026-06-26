@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/kshama7/kubepilot/backend/internal/ai"
@@ -428,6 +430,26 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		s.metrics.APIRequestDuration.
 			WithLabelValues(r.Method, route, statusClass(status)).
 			Observe(time.Since(start).Seconds())
+
+		// Enrich the otelhttp span (the analysis-run span) now that routing has
+		// resolved the pattern, cluster id, and analyzer. No-op when tracing is
+		// disabled (the span isn't recording).
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+			span.SetName(r.Method + " " + route)
+			span.SetAttributes(
+				attribute.String("http.route", route),
+				attribute.Int("http.status_code", status),
+			)
+			if id := chi.URLParam(r, "id"); id != "" {
+				span.SetAttributes(attribute.String("kubepilot.cluster_id", id))
+			}
+			if a := r.URL.Query().Get("analyzer"); a != "" {
+				span.SetAttributes(attribute.String("kubepilot.analyzer", a))
+			}
+			if ns := r.URL.Query().Get("namespace"); ns != "" {
+				span.SetAttributes(attribute.String("kubepilot.namespace", ns))
+			}
+		}
 
 		s.log.Debug("http request",
 			zap.String("method", r.Method),

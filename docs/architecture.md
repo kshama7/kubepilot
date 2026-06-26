@@ -306,6 +306,25 @@ deterministic analysis is unaffected. Model and token budget are overridable
 so the layer is unit-tested against an `httptest` server — no key or network
 needed in CI.
 
+## Deployment & tracing (M10)
+
+- **Helm chart** (`helm/kubepilot`) — Deployment, Service, read-only ClusterRole +
+  binding (KubePilot never mutates the cluster), optional Prometheus-Operator
+  ServiceMonitor, hardened pod/container security context, and an optional
+  metrics/AI/OTLP wiring via values. `helm lint` and `helm template` run in CI.
+- **Local observability stack** (`docker compose --profile observability up`) —
+  Prometheus scraping the API's `/metrics`, and Grafana auto-provisioned with the
+  Prometheus datasource and the "KubePilot — Reliability Overview" dashboard
+  (`observability/grafana/dashboards/kubepilot.json`).
+- **Distributed tracing** — `internal/observability` installs an OpenTelemetry
+  tracer provider exporting OTLP/gRPC when `KUBEPILOT_OTEL_ENDPOINT` is set. The
+  router is wrapped with `otelhttp`, so every analysis run is a span; the API
+  middleware enriches it with `kubepilot.cluster_id`, `kubepilot.analyzer`,
+  `http.route`, and status. With no endpoint configured the global tracer stays a
+  no-op — tracing is free and the process runs unchanged.
+- **CI** (`.github/workflows/ci.yml`) — gofmt check, `go vet`, `go build`,
+  `go test -race`, `helm lint`/`template`, and a Docker build.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
