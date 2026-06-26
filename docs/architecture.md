@@ -212,6 +212,32 @@ The `OutOfSync` finding enumerates exactly which managed resources drifted (from
 app. A failed sync operation is treated as the most urgent signal — the desired
 state did not apply, so the cluster is silently diverging from Git.
 
+## Security checks (M7)
+
+`analysis.AnalyzeSecurity` evaluates pod and container security posture against
+common hardening controls (Pod Security Standards / CIS-flavored).
+
+| Issue type                  | Detection rule                                                  | Severity         |
+|-----------------------------|----------------------------------------------------------------|------------------|
+| `PrivilegedContainer`       | `securityContext.privileged: true`                             | critical         |
+| `DangerousCapability`       | adds ALL/SYS_ADMIN (critical) or other powerful caps (warning) | critical/warning |
+| `HostPathVolume`            | hostPath mount — sensitive paths (docker.sock, /proc…) critical | critical/warning |
+| `HostNamespace`             | hostNetwork / hostPID / hostIPC                                | warning          |
+| `RunAsRoot`                 | no runAsNonRoot and no non-zero runAsUser (pod default aware)   | warning          |
+| `AllowPrivilegeEscalation`  | explicitly true (warning) or unset/default-true (info)         | warning/info     |
+| `PlaintextSecretEnv`        | secret-like env name with an inline value (not `valueFrom`)    | warning          |
+| `WritableRootFilesystem`    | `readOnlyRootFilesystem` not true                              | info             |
+| `NoCapabilityDrop`          | container does not drop ALL capabilities                       | info             |
+
+**Noise control built in.** A privileged container is the headline — it
+suppresses the redundant `RunAsRoot`/`AllowPrivilegeEscalation` findings it would
+otherwise trigger. Root detection resolves container *and* pod-level
+`runAsNonRoot`/`runAsUser` (an explicit non-zero UID is not root). Capability
+names are normalized (`CAP_SYS_ADMIN` → `SYS_ADMIN`). The plaintext-secret check
+only fires on an *inline* value — a `valueFrom: secretKeyRef` is the correct
+pattern and is never flagged. Hardening nudges are info-level so they never drown
+out a real critical.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -235,6 +261,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/reliability` | Run the Reliability analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/upgrade`     | Run the Upgrade Readiness analyzer (`?target=1.25` optional) |
 | GET    | `/api/v1/clusters/{id}/gitops`      | Run the GitOps (ArgoCD) analyzer (`?namespace=` optional) |
+| GET    | `/api/v1/clusters/{id}/security`    | Run the Security analyzer (`?namespace=` optional) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns

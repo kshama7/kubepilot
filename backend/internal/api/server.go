@@ -26,6 +26,7 @@ type ClusterCollector interface {
 	CollectReliabilitySnapshot(ctx context.Context, clusterID, namespace string) analysis.ReliabilitySnapshot
 	CollectUpgradeSnapshot(ctx context.Context, clusterID string) analysis.UpgradeSnapshot
 	CollectGitOpsSnapshot(ctx context.Context, clusterID, namespace string) analysis.GitOpsSnapshot
+	CollectSecuritySnapshot(ctx context.Context, clusterID, namespace string) analysis.SecuritySnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -62,6 +63,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/clusters/{id}/reliability", s.handleReliability)
 		r.Get("/clusters/{id}/upgrade", s.handleUpgrade)
 		r.Get("/clusters/{id}/gitops", s.handleGitOps)
+		r.Get("/clusters/{id}/security", s.handleSecurity)
 	})
 
 	return r
@@ -314,6 +316,47 @@ func (s *Server) handleGitOps(w http.ResponseWriter, r *http.Request) {
 		zap.String("namespace", namespace),
 		zap.Bool("argocd_installed", report.Summary.ArgoCDInstalled),
 		zap.Int("applications", report.Summary.TotalApplications),
+		zap.Int("findings", len(report.Findings)),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	namespace := r.URL.Query().Get("namespace")
+
+	start := time.Now()
+	snap := s.collector.CollectSecuritySnapshot(r.Context(), clusterID, namespace)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("security", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not list pods: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeSecurity(snap)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("security", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("security", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("security analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.String("namespace", namespace),
+		zap.Int("pods", report.Summary.TotalPods),
+		zap.Int("privileged_pods", report.Summary.PrivilegedPods),
 		zap.Int("findings", len(report.Findings)),
 		zap.Duration("duration", elapsed),
 	)

@@ -623,6 +623,91 @@ func argoApplicationFrom(u *unstructured.Unstructured) analysis.ArgoApplication 
 	return app
 }
 
+// CollectSecuritySnapshot lists pods and distills their security posture
+// (privilege, capabilities, security contexts, host access, and inline env vars)
+// for the security rules.
+func (c *Client) CollectSecuritySnapshot(ctx context.Context, clusterID, namespace string) analysis.SecuritySnapshot {
+	snap := analysis.SecuritySnapshot{
+		ClusterID:   clusterID,
+		Namespace:   namespace,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing pods failed",
+			zap.String("cluster_id", clusterID), zap.String("namespace", namespace), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	snap.Pods = make([]analysis.PodSecurity, 0, len(podList.Items))
+	for i := range podList.Items {
+		snap.Pods = append(snap.Pods, podSecurityFrom(&podList.Items[i]))
+	}
+	return snap
+}
+
+func podSecurityFrom(p *corev1.Pod) analysis.PodSecurity {
+	ps := analysis.PodSecurity{
+		Namespace:   p.Namespace,
+		Name:        p.Name,
+		HostNetwork: p.Spec.HostNetwork,
+		HostPID:     p.Spec.HostPID,
+		HostIPC:     p.Spec.HostIPC,
+	}
+	if sc := p.Spec.SecurityContext; sc != nil {
+		ps.RunAsNonRoot = sc.RunAsNonRoot
+		ps.RunAsUser = sc.RunAsUser
+	}
+	for _, v := range p.Spec.Volumes {
+		if v.HostPath != nil {
+			ps.HostPathVolumes = append(ps.HostPathVolumes, analysis.HostPathVolume{Name: v.Name, Path: v.HostPath.Path})
+		}
+	}
+	for i := range p.Spec.InitContainers {
+		ps.Containers = append(ps.Containers, containerSecurityFrom(&p.Spec.InitContainers[i], true))
+	}
+	for i := range p.Spec.Containers {
+		ps.Containers = append(ps.Containers, containerSecurityFrom(&p.Spec.Containers[i], false))
+	}
+	return ps
+}
+
+func containerSecurityFrom(c *corev1.Container, init bool) analysis.ContainerSecurity {
+	cs := analysis.ContainerSecurity{Name: c.Name, Init: init}
+
+	if sc := c.SecurityContext; sc != nil {
+		if sc.Privileged != nil {
+			cs.Privileged = *sc.Privileged
+		}
+		cs.AllowPrivilegeEscalation = sc.AllowPrivilegeEscalation
+		cs.RunAsNonRoot = sc.RunAsNonRoot
+		cs.RunAsUser = sc.RunAsUser
+		cs.ReadOnlyRootFilesystem = sc.ReadOnlyRootFilesystem
+		if caps := sc.Capabilities; caps != nil {
+			for _, add := range caps.Add {
+				cs.AddedCapabilities = append(cs.AddedCapabilities, string(add))
+			}
+			for _, drop := range caps.Drop {
+				if string(drop) == "ALL" {
+					cs.DropsAll = true
+				}
+			}
+		}
+	}
+
+	for _, e := range c.Env {
+		cs.Env = append(cs.Env, analysis.EnvVarRef{
+			Name:            e.Name,
+			HasLiteralValue: e.Value != "" && e.ValueFrom == nil,
+		})
+	}
+	return cs
+}
+
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.
 func nodeStatusFrom(n *corev1.Node) analysis.NodeStatus {
 	ns := analysis.NodeStatus{
