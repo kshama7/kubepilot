@@ -20,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/kshama7/kubepilot/backend/internal/ai"
 	"github.com/kshama7/kubepilot/backend/internal/api"
 	"github.com/kshama7/kubepilot/backend/internal/config"
 	"github.com/kshama7/kubepilot/backend/internal/k8s"
@@ -108,7 +109,18 @@ func run() error {
 		collector = client
 	}
 
-	srv := api.NewServer(logger.Named("http"), m, collector, version)
+	explainer := ai.NewExplainer(ai.Config{
+		APIKey:    cfg.AI.APIKey,
+		Model:     cfg.AI.Model,
+		MaxTokens: cfg.AI.MaxTokens,
+	})
+	if explainer.Enabled() {
+		logger.Info("ai explanation layer enabled", zap.String("model", explainer.Model()))
+	} else {
+		logger.Info("ai explanation layer disabled; set KUBEPILOT_ANTHROPIC_API_KEY to enable")
+	}
+
+	srv := api.NewServer(logger.Named("http"), m, collector, explainer, version)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Router(),

@@ -4,10 +4,9 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **Milestone 8 of 10** — all eight analyzers complete (Cluster Health,
-> Workload, Resource, Reliability, Upgrade Readiness, GitOps, Security, Capacity).
-> Subsequent milestones add the Next.js dashboard, the AI explanation layer, and
-> production hardening.
+> Status: **Milestone 9 of 10** — all eight analyzers plus the AI explanation
+> layer (Claude explains deterministic findings, never generates them). The final
+> milestone is production hardening (Helm, full Prom/Grafana/OTel, CI, dashboard).
 
 ## Architecture
 
@@ -76,6 +75,8 @@ curl -s "localhost:8080/api/v1/clusters/my-cluster/upgrade?target=1.25" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/gitops" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/security?namespace=default" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/capacity" | jq   # set KUBEPILOT_PROMETHEUS_URL for trends
+# AI explanation over deterministic findings — set KUBEPILOT_ANTHROPIC_API_KEY first
+curl -s "localhost:8080/api/v1/clusters/my-cluster/explain?analyzer=workload&namespace=prod" | jq
 
 # 3. (optional) spin up a throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build

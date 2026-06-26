@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/kshama7/kubepilot/backend/internal/ai"
 	"github.com/kshama7/kubepilot/backend/internal/analysis"
 	"github.com/kshama7/kubepilot/backend/internal/metrics"
 )
@@ -31,17 +32,20 @@ type ClusterCollector interface {
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
-// resolvable at boot; affected endpoints return 503 rather than crashing.
+// resolvable at boot; affected endpoints return 503 rather than crashing. The
+// explainer is always non-nil but may be disabled (no API key), in which case
+// the explain endpoint returns 503.
 type Server struct {
 	log       *zap.Logger
 	metrics   *metrics.Metrics
 	collector ClusterCollector
+	explainer *ai.Explainer
 	version   string
 }
 
 // NewServer constructs a Server. collector may be nil.
-func NewServer(log *zap.Logger, m *metrics.Metrics, collector ClusterCollector, version string) *Server {
-	return &Server{log: log, metrics: m, collector: collector, version: version}
+func NewServer(log *zap.Logger, m *metrics.Metrics, collector ClusterCollector, explainer *ai.Explainer, version string) *Server {
+	return &Server{log: log, metrics: m, collector: collector, explainer: explainer, version: version}
 }
 
 // Router builds the chi router with all routes and middleware mounted.
@@ -66,6 +70,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/clusters/{id}/gitops", s.handleGitOps)
 		r.Get("/clusters/{id}/security", s.handleSecurity)
 		r.Get("/clusters/{id}/capacity", s.handleCapacity)
+		r.Get("/clusters/{id}/explain", s.handleExplain)
 	})
 
 	return r

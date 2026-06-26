@@ -30,6 +30,18 @@ type Config struct {
 	// planning. When PrometheusURL is empty, capacity analysis falls back to
 	// API-server-only data (density and commitment) with no utilization trends.
 	Prometheus PrometheusConfig
+
+	// AI configures the optional Claude-backed explanation layer. When APIKey is
+	// empty the explain endpoint returns 503; all deterministic analysis is
+	// unaffected.
+	AI AIConfig
+}
+
+// AIConfig holds the Claude API settings for the explanation layer.
+type AIConfig struct {
+	APIKey    string
+	Model     string
+	MaxTokens int64
 }
 
 // PrometheusConfig holds the capacity-planning Prometheus settings. The PromQL
@@ -63,6 +75,11 @@ func Load() Config {
 			StepMinutes:   envInt("KUBEPILOT_PROMETHEUS_STEP_MINUTES", 30),
 			CPUQuery:      env("KUBEPILOT_PROMETHEUS_CPU_QUERY", defaultCPUQuery),
 			MemQuery:      env("KUBEPILOT_PROMETHEUS_MEM_QUERY", defaultMemQuery),
+		},
+		AI: AIConfig{
+			APIKey:    os.Getenv("KUBEPILOT_ANTHROPIC_API_KEY"),
+			Model:     env("KUBEPILOT_AI_MODEL", "claude-opus-4-8"),
+			MaxTokens: int64(envInt("KUBEPILOT_AI_MAX_TOKENS", 1024)),
 		},
 	}
 }

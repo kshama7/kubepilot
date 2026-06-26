@@ -268,6 +268,44 @@ expressions that return a per-node fraction labeled `node` (as kube-prometheus-
 stack exposes). Without it, `prometheusAvailable` is false and only density and
 commitment are reported.
 
+## AI explanation layer (M9)
+
+`internal/ai` is a strictly **post-analysis** layer. The explain endpoint runs a
+deterministic analyzer, reduces its report to analyzer-agnostic findings, and
+hands *only those findings* to Claude (`claude-opus-4-8`) to explain and
+prioritize. The model never runs free-standing and cannot introduce issues the
+rule engine didn't find.
+
+```
+GET /api/v1/clusters/{id}/explain?analyzer=workload[&namespace=][&target=]
+        │
+        ▼
+  deterministic analyzer (workload/resource/security/…)  ──▶  []ai.Finding
+        │                                                          │
+        │ (no findings → 200 "nothing to explain", AI not called)  │
+        ▼                                                          ▼
+  ai.Explainer.Explain  ──▶  Anthropic Messages API (system prompt forbids invention)
+        │
+        ▼
+  { model, findingsExplained, explanation (markdown) }
+```
+
+**Guardrails that make it an explanation layer, not a generator:**
+
+- The system prompt explicitly forbids inventing, inferring, or speculating
+  beyond the supplied findings, and requires references by exact type/resource.
+- The handler passes the deterministic findings verbatim in the user turn; the
+  unit test asserts they appear in the outgoing request body.
+- Empty findings short-circuit to a static "nothing to explain" response — the
+  model is never given a blank canvas to fill.
+
+**Optional and degrades cleanly.** Set `KUBEPILOT_ANTHROPIC_API_KEY` to enable;
+without it the explainer is disabled and the endpoint returns `503` while all
+deterministic analysis is unaffected. Model and token budget are overridable
+(`KUBEPILOT_AI_MODEL`, `KUBEPILOT_AI_MAX_TOKENS`). The SDK base URL is injectable,
+so the layer is unit-tested against an `httptest` server — no key or network
+needed in CI.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -293,6 +331,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/gitops`      | Run the GitOps (ArgoCD) analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/security`    | Run the Security analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/capacity`    | Run the Capacity Planning analyzer (cluster-wide) |
+| GET    | `/api/v1/clusters/{id}/explain`     | Run an analyzer and have the AI explain its findings (`?analyzer=` required) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns
