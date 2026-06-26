@@ -139,6 +139,33 @@ Usage comes from the `metrics.k8s.io` API via a metrics-server clientset built
 from the same REST config; when metrics-server is absent the analyzer degrades
 to spec-only and sets `metricsAvailable: false`.
 
+## Reliability checks (M4)
+
+`analysis.AnalyzeReliability` evaluates a `ReliabilitySnapshot` of Deployments
+and StatefulSets (with their matched PDBs) for redundancy and disruption-safety
+gaps.
+
+| Issue type                      | Detection rule                                                     | Severity |
+|---------------------------------|-------------------------------------------------------------------|----------|
+| `SingleReplica`                 | replicas == 1 (single point of failure)                           | warning  |
+| `MissingPodDisruptionBudget`    | replicas > 1 and no PDB selects the pods                          | warning  |
+| `PDBBlocksVoluntaryDisruption`  | a matching PDB permits zero disruptions (drains hang)            | warning  |
+| `NoSpreadConstraints`           | replicas > 1 with neither pod anti-affinity nor topology spread  | warning  |
+| `MissingReadinessProbe`         | container has no readiness probe                                 | warning  |
+| `MissingLivenessProbe`          | container has no liveness probe                                  | info     |
+
+**PDB matching is real, not heuristic.** The collector resolves each PDB's
+`LabelSelector` (matchLabels *and* matchExpressions) against the workload's
+pod-template labels via `metav1.LabelSelectorAsSelector`, and computes
+`AllowsDisruption` with the same int/percent rounding the disruption controller
+uses (`intstr.GetScaledValueFromIntOrPercent`). The rule layer only sees the
+resolved booleans, so `analysis` stays free of apimachinery.
+
+Single-replica workloads are not also nagged for a missing PDB or spread policy
+(redundancy is the prerequisite). Init containers are skipped for probe checks
+(they run to completion). A blocking PDB counts as coverage — it reports
+`PDBBlocksVoluntaryDisruption`, never `MissingPodDisruptionBudget`.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -159,6 +186,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/health`      | Run the Cluster Health analyzer        |
 | GET    | `/api/v1/clusters/{id}/workloads`   | Run the Workload analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/resources`   | Run the Resource analyzer (`?namespace=` optional) |
+| GET    | `/api/v1/clusters/{id}/reliability` | Run the Reliability analyzer (`?namespace=` optional) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns

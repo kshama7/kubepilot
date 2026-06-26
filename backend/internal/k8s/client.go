@@ -10,7 +10,10 @@ import (
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -306,6 +309,142 @@ func quantitiesFrom(rl corev1.ResourceList) analysis.ResourceQuantities {
 		q.MemSet = true
 	}
 	return q
+}
+
+// CollectReliabilitySnapshot lists Deployments and StatefulSets plus the
+// namespace's PodDisruptionBudgets, then matches each PDB to a workload by its
+// real label selector so the reliability rules can reason about PDB coverage.
+func (c *Client) CollectReliabilitySnapshot(ctx context.Context, clusterID, namespace string) analysis.ReliabilitySnapshot {
+	snap := analysis.ReliabilitySnapshot{
+		ClusterID:   clusterID,
+		Namespace:   namespace,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	deploys, err := c.clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing deployments failed", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	statefulsets, err := c.clientset.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing statefulsets failed", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	// PDBs are optional (the policy API or RBAC may be unavailable); treat a
+	// failure as "no PDBs" rather than failing the whole analysis.
+	var pdbs []policyv1.PodDisruptionBudget
+	if pdbList, err := c.clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{}); err != nil {
+		c.log.Info("listing PDBs failed; treating workloads as unprotected", zap.Error(err))
+	} else {
+		pdbs = pdbList.Items
+	}
+
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		snap.Workloads = append(snap.Workloads, workloadSpecFrom(
+			d.Namespace, d.Name, "Deployment", replicasOrDefault(d.Spec.Replicas),
+			d.Spec.Template, pdbs))
+	}
+	for i := range statefulsets.Items {
+		s := &statefulsets.Items[i]
+		snap.Workloads = append(snap.Workloads, workloadSpecFrom(
+			s.Namespace, s.Name, "StatefulSet", replicasOrDefault(s.Spec.Replicas),
+			s.Spec.Template, pdbs))
+	}
+	return snap
+}
+
+func replicasOrDefault(r *int32) int32 {
+	if r == nil {
+		return 1 // apps/v1 defaults a nil replica count to 1
+	}
+	return *r
+}
+
+func workloadSpecFrom(ns, name, kind string, replicas int32, tmpl corev1.PodTemplateSpec, pdbs []policyv1.PodDisruptionBudget) analysis.WorkloadSpec {
+	w := analysis.WorkloadSpec{
+		Namespace: ns, Name: name, Kind: kind, Replicas: replicas,
+		HasPodAntiAffinity: tmpl.Spec.Affinity != nil && tmpl.Spec.Affinity.PodAntiAffinity != nil,
+		HasTopologySpread:  len(tmpl.Spec.TopologySpreadConstraints) > 0,
+	}
+	for i := range tmpl.Spec.InitContainers {
+		w.Containers = append(w.Containers, probesFrom(&tmpl.Spec.InitContainers[i], true))
+	}
+	for i := range tmpl.Spec.Containers {
+		w.Containers = append(w.Containers, probesFrom(&tmpl.Spec.Containers[i], false))
+	}
+	w.PDBs = matchingPDBs(tmpl.Labels, replicas, pdbs)
+	return w
+}
+
+func probesFrom(c *corev1.Container, init bool) analysis.ContainerProbes {
+	return analysis.ContainerProbes{
+		Name:         c.Name,
+		Init:         init,
+		HasReadiness: c.ReadinessProbe != nil,
+		HasLiveness:  c.LivenessProbe != nil,
+		HasStartup:   c.StartupProbe != nil,
+	}
+}
+
+// matchingPDBs returns the PDBs whose selector matches the workload's pod-template
+// labels, resolving whether each permits at least one voluntary disruption given
+// the replica count.
+func matchingPDBs(templateLabels map[string]string, replicas int32, pdbs []policyv1.PodDisruptionBudget) []analysis.PDBRef {
+	if len(templateLabels) == 0 {
+		return nil
+	}
+	set := labels.Set(templateLabels)
+	var out []analysis.PDBRef
+	for i := range pdbs {
+		pdb := &pdbs[i]
+		sel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+		if err != nil || sel.Empty() || !sel.Matches(set) {
+			continue
+		}
+		out = append(out, analysis.PDBRef{
+			Name:             pdb.Name,
+			MinAvailable:     intstrString(pdb.Spec.MinAvailable),
+			MaxUnavailable:   intstrString(pdb.Spec.MaxUnavailable),
+			AllowsDisruption: pdbAllowsDisruption(pdb, replicas),
+		})
+	}
+	return out
+}
+
+// pdbAllowsDisruption reports whether the PDB leaves room to evict at least one
+// pod, using the same int/percent rounding the disruption controller applies.
+func pdbAllowsDisruption(pdb *policyv1.PodDisruptionBudget, replicas int32) bool {
+	total := int(replicas)
+	if pdb.Spec.MaxUnavailable != nil {
+		maxUnavail, err := intstr.GetScaledValueFromIntOrPercent(pdb.Spec.MaxUnavailable, total, false)
+		if err != nil {
+			return true // can't resolve → don't raise a false alarm
+		}
+		return maxUnavail >= 1
+	}
+	if pdb.Spec.MinAvailable != nil {
+		minAvail, err := intstr.GetScaledValueFromIntOrPercent(pdb.Spec.MinAvailable, total, true)
+		if err != nil {
+			return true
+		}
+		return total-minAvail >= 1
+	}
+	return true // neither field set: PDB imposes no constraint
+}
+
+func intstrString(v *intstr.IntOrString) string {
+	if v == nil {
+		return ""
+	}
+	return v.String()
 }
 
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.

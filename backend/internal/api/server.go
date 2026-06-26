@@ -23,6 +23,7 @@ type ClusterCollector interface {
 	CollectClusterSnapshot(ctx context.Context, clusterID string) analysis.ClusterSnapshot
 	CollectWorkloadSnapshot(ctx context.Context, clusterID, namespace string) analysis.WorkloadSnapshot
 	CollectResourceSnapshot(ctx context.Context, clusterID, namespace string) analysis.ResourceSnapshot
+	CollectReliabilitySnapshot(ctx context.Context, clusterID, namespace string) analysis.ReliabilitySnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -56,6 +57,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/clusters/{id}/health", s.handleClusterHealth)
 		r.Get("/clusters/{id}/workloads", s.handleWorkloads)
 		r.Get("/clusters/{id}/resources", s.handleResources)
+		r.Get("/clusters/{id}/reliability", s.handleReliability)
 	})
 
 	return r
@@ -185,6 +187,46 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 		zap.Int("containers", report.Summary.TotalContainers),
 		zap.Int("findings", len(report.Findings)),
 		zap.Bool("metrics_available", report.Summary.MetricsAvailable),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleReliability(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	namespace := r.URL.Query().Get("namespace")
+
+	start := time.Now()
+	snap := s.collector.CollectReliabilitySnapshot(r.Context(), clusterID, namespace)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("reliability", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not list workloads: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeReliability(snap)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("reliability", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("reliability", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("reliability analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.String("namespace", namespace),
+		zap.Int("workloads", report.Summary.TotalWorkloads),
+		zap.Int("findings", len(report.Findings)),
 		zap.Duration("duration", elapsed),
 	)
 
