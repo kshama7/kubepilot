@@ -22,6 +22,7 @@ import (
 type ClusterCollector interface {
 	CollectClusterSnapshot(ctx context.Context, clusterID string) analysis.ClusterSnapshot
 	CollectWorkloadSnapshot(ctx context.Context, clusterID, namespace string) analysis.WorkloadSnapshot
+	CollectResourceSnapshot(ctx context.Context, clusterID, namespace string) analysis.ResourceSnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -54,6 +55,7 @@ func (s *Server) Router() http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/clusters/{id}/health", s.handleClusterHealth)
 		r.Get("/clusters/{id}/workloads", s.handleWorkloads)
+		r.Get("/clusters/{id}/resources", s.handleResources)
 	})
 
 	return r
@@ -142,6 +144,47 @@ func (s *Server) handleWorkloads(w http.ResponseWriter, r *http.Request) {
 		zap.String("namespace", namespace),
 		zap.Int("pods", report.Summary.TotalPods),
 		zap.Int("findings", len(report.Findings)),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	namespace := r.URL.Query().Get("namespace")
+
+	start := time.Now()
+	snap := s.collector.CollectResourceSnapshot(r.Context(), clusterID, namespace)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("resource", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not list pods: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeResources(snap)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("resource", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("resource", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("resources analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.String("namespace", namespace),
+		zap.Int("containers", report.Summary.TotalContainers),
+		zap.Int("findings", len(report.Findings)),
+		zap.Bool("metrics_available", report.Summary.MetricsAvailable),
 		zap.Duration("duration", elapsed),
 	)
 

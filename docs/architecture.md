@@ -111,6 +111,34 @@ image-pull/sandbox-creation churn does not generate noise.
 Collection vs scoring stays split exactly as in M1: `k8s.CollectWorkloadSnapshot`
 does the listing, `analysis.AnalyzeWorkloads` is pure and table-tested.
 
+## Resource optimization (M3)
+
+`analysis.AnalyzeResources` evaluates a `ResourceSnapshot` (pod specs + optional
+live usage). Spec-level rules run always; usage-based rightsizing runs only when
+metrics-server answered (`MetricsAvailable`). No usage is ever fabricated.
+
+| Issue type                 | Detection rule                                                  | Severity |
+|----------------------------|----------------------------------------------------------------|----------|
+| `BestEffortQoS`            | pod QoS is BestEffort (no requests/limits anywhere)            | warning  |
+| `MissingCPURequest`        | container has no CPU request                                   | warning  |
+| `MissingMemoryRequest`     | container has no memory request                               | warning  |
+| `MissingMemoryLimit`       | container has no memory limit (node-OOM risk)                 | warning  |
+| `HighLimitToRequestRatio`  | CPU limit ≥ 4× request (noisy-neighbor risk)                  | info     |
+| `CPUOverProvisioned`       | live CPU usage < 30% of request (rightsizing candidate)       | info     |
+| `MemoryOverProvisioned`    | live memory usage < 30% of request                           | info     |
+
+A missing **CPU limit** is intentionally *not* flagged — it is acceptable and
+often preferred (avoids CFS throttling). BestEffort pods collapse to a single
+finding instead of a per-container storm. Rightsizing suggests
+`ceil(usage × 1.2)` (20% headroom), only when it's below the current request and
+above a floor (50m CPU / 64Mi), and labels every recommendation as point-in-time
+— to be validated against historical peaks (the M8 capacity work). The report
+sums reclaimable CPU/memory across all rightsizing findings.
+
+Usage comes from the `metrics.k8s.io` API via a metrics-server clientset built
+from the same REST config; when metrics-server is absent the analyzer degrades
+to spec-only and sets `metricsAvailable: false`.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -130,6 +158,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/metrics`                          | Prometheus scrape                      |
 | GET    | `/api/v1/clusters/{id}/health`      | Run the Cluster Health analyzer        |
 | GET    | `/api/v1/clusters/{id}/workloads`   | Run the Workload analyzer (`?namespace=` optional) |
+| GET    | `/api/v1/clusters/{id}/resources`   | Run the Resource analyzer (`?namespace=` optional) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns

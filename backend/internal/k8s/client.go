@@ -14,13 +14,19 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/kshama7/kubepilot/backend/internal/analysis"
 )
 
 // Client is a thin, logged wrapper over a Kubernetes clientset.
+//
+// metrics is optional: it talks to the metrics.k8s.io API (metrics-server). It
+// is nil in tests and may be non-nil but unanswered when metrics-server is not
+// installed, in which case usage-based analysis degrades gracefully.
 type Client struct {
 	clientset kubernetes.Interface
+	metrics   metricsclient.Interface
 	log       *zap.Logger
 }
 
@@ -43,8 +49,15 @@ func NewClient(log *zap.Logger, kubeconfigPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build clientset: %w", err)
 	}
+	// The metrics clientset shares the same REST config. Constructing it never
+	// hits the network; whether metrics-server actually answers is determined at
+	// collection time.
+	mc, err := metricsclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build metrics clientset: %w", err)
+	}
 	log.Info("kubernetes client initialized", zap.String("config_source", source), zap.String("host", cfg.Host))
-	return &Client{clientset: cs, log: log}, nil
+	return &Client{clientset: cs, metrics: mc, log: log}, nil
 }
 
 // NewClientFromInterface wraps an existing clientset. Used in tests with a fake.
@@ -186,6 +199,113 @@ func containerStateFrom(cs *corev1.ContainerStatus, init bool) analysis.Containe
 		out.LastTerminatedExitCode = cs.LastTerminationState.Terminated.ExitCode
 	}
 	return out
+}
+
+// CollectResourceSnapshot lists pods (their specs carry requests/limits and
+// status carries the QoS class) and, when metrics-server is reachable, merges in
+// live per-container usage so the resource rules can produce rightsizing
+// recommendations. Absent metrics-server, MetricsAvailable is false and the
+// rules fall back to spec-only checks.
+func (c *Client) CollectResourceSnapshot(ctx context.Context, clusterID, namespace string) analysis.ResourceSnapshot {
+	snap := analysis.ResourceSnapshot{
+		ClusterID:   clusterID,
+		Namespace:   namespace,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing pods failed",
+			zap.String("cluster_id", clusterID), zap.String("namespace", namespace), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	usage := c.collectPodUsage(ctx, namespace)
+	snap.MetricsAvailable = usage != nil
+
+	snap.Pods = make([]analysis.PodResources, 0, len(podList.Items))
+	for i := range podList.Items {
+		snap.Pods = append(snap.Pods, podResourcesFrom(&podList.Items[i], usage))
+	}
+	return snap
+}
+
+// usageKey indexes live usage by namespace/pod/container.
+type usageKey struct{ ns, pod, container string }
+type usageVal struct{ cpuMilli, memBytes int64 }
+
+// collectPodUsage queries metrics-server. A nil return means usage is
+// unavailable (metrics-server absent or erroring) — the caller treats that as
+// "spec-only analysis", not a failure.
+func (c *Client) collectPodUsage(ctx context.Context, namespace string) map[usageKey]usageVal {
+	if c.metrics == nil {
+		return nil
+	}
+	list, err := c.metrics.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Info("pod metrics unavailable; resource analysis will be spec-only",
+			zap.String("namespace", namespace), zap.Error(err))
+		return nil
+	}
+	out := make(map[usageKey]usageVal, len(list.Items))
+	for _, pm := range list.Items {
+		for _, cm := range pm.Containers {
+			cpu := cm.Usage.Cpu()
+			mem := cm.Usage.Memory()
+			out[usageKey{pm.Namespace, pm.Name, cm.Name}] = usageVal{
+				cpuMilli: cpu.MilliValue(),
+				memBytes: mem.Value(),
+			}
+		}
+	}
+	return out
+}
+
+func podResourcesFrom(p *corev1.Pod, usage map[usageKey]usageVal) analysis.PodResources {
+	pr := analysis.PodResources{
+		Namespace: p.Namespace,
+		Name:      p.Name,
+		QOSClass:  string(p.Status.QOSClass),
+	}
+	add := func(c *corev1.Container, init bool) {
+		cr := analysis.ContainerResources{
+			Name:     c.Name,
+			Init:     init,
+			Requests: quantitiesFrom(c.Resources.Requests),
+			Limits:   quantitiesFrom(c.Resources.Limits),
+		}
+		if usage != nil {
+			if u, ok := usage[usageKey{p.Namespace, p.Name, c.Name}]; ok {
+				cr.HasUsage = true
+				cr.UsageCPUMilli = u.cpuMilli
+				cr.UsageMemBytes = u.memBytes
+			}
+		}
+		pr.Containers = append(pr.Containers, cr)
+	}
+	for i := range p.Spec.InitContainers {
+		add(&p.Spec.InitContainers[i], true)
+	}
+	for i := range p.Spec.Containers {
+		add(&p.Spec.Containers[i], false)
+	}
+	return pr
+}
+
+func quantitiesFrom(rl corev1.ResourceList) analysis.ResourceQuantities {
+	q := analysis.ResourceQuantities{}
+	if cpu, ok := rl[corev1.ResourceCPU]; ok {
+		q.CPUMilli = cpu.MilliValue()
+		q.CPUSet = true
+	}
+	if mem, ok := rl[corev1.ResourceMemory]; ok {
+		q.MemBytes = mem.Value()
+		q.MemSet = true
+	}
+	return q
 }
 
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.
