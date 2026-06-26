@@ -24,6 +24,7 @@ type ClusterCollector interface {
 	CollectWorkloadSnapshot(ctx context.Context, clusterID, namespace string) analysis.WorkloadSnapshot
 	CollectResourceSnapshot(ctx context.Context, clusterID, namespace string) analysis.ResourceSnapshot
 	CollectReliabilitySnapshot(ctx context.Context, clusterID, namespace string) analysis.ReliabilitySnapshot
+	CollectUpgradeSnapshot(ctx context.Context, clusterID string) analysis.UpgradeSnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -58,6 +59,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/clusters/{id}/workloads", s.handleWorkloads)
 		r.Get("/clusters/{id}/resources", s.handleResources)
 		r.Get("/clusters/{id}/reliability", s.handleReliability)
+		r.Get("/clusters/{id}/upgrade", s.handleUpgrade)
 	})
 
 	return r
@@ -227,6 +229,49 @@ func (s *Server) handleReliability(w http.ResponseWriter, r *http.Request) {
 		zap.String("namespace", namespace),
 		zap.Int("workloads", report.Summary.TotalWorkloads),
 		zap.Int("findings", len(report.Findings)),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	// Optional explicit target version, e.g. ?target=1.25. Empty defaults to the
+	// next minor after the cluster's current version.
+	target := r.URL.Query().Get("target")
+
+	start := time.Now()
+	snap := s.collector.CollectUpgradeSnapshot(r.Context(), clusterID)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("upgrade", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not reach API server: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeUpgrade(snap, target)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("upgrade", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("upgrade", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("upgrade readiness analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.String("current_version", report.CurrentVersion),
+		zap.String("target_version", report.TargetVersion),
+		zap.Int("removed_apis", report.Summary.RemovedAPIs),
+		zap.Int("deprecated_apis", report.Summary.DeprecatedAPIs),
 		zap.Duration("duration", elapsed),
 	)
 

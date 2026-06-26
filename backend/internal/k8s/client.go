@@ -6,6 +6,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,7 +14,9 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -30,6 +33,7 @@ import (
 type Client struct {
 	clientset kubernetes.Interface
 	metrics   metricsclient.Interface
+	dynamic   dynamic.Interface
 	log       *zap.Logger
 }
 
@@ -59,8 +63,14 @@ func NewClient(log *zap.Logger, kubeconfigPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build metrics clientset: %w", err)
 	}
+	// The dynamic client lets the upgrade analyzer count instances of arbitrary
+	// (including deprecated) GVRs without compiled-in typed clients.
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build dynamic client: %w", err)
+	}
 	log.Info("kubernetes client initialized", zap.String("config_source", source), zap.String("host", cfg.Host))
-	return &Client{clientset: cs, metrics: mc, log: log}, nil
+	return &Client{clientset: cs, metrics: mc, dynamic: dyn, log: log}, nil
 }
 
 // NewClientFromInterface wraps an existing clientset. Used in tests with a fake.
@@ -445,6 +455,78 @@ func intstrString(v *intstr.IntOrString) string {
 		return ""
 	}
 	return v.String()
+}
+
+// CollectUpgradeSnapshot determines the cluster version and which registry-listed
+// deprecated APIs the cluster currently serves, counting live instances of each
+// via the dynamic client. The version comparison itself is left to the analyzer.
+func (c *Client) CollectUpgradeSnapshot(ctx context.Context, clusterID string) analysis.UpgradeSnapshot {
+	snap := analysis.UpgradeSnapshot{
+		ClusterID:   clusterID,
+		CollectedAt: time.Now().UTC(),
+	}
+
+	version, err := c.clientset.Discovery().ServerVersion()
+	if err != nil {
+		c.log.Warn("api server unreachable", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+	snap.CurrentVersion = version.GitVersion
+
+	// ServerGroupsAndResources can return partial results with an aggregate error
+	// (a flaky aggregated-API group should not blind the rest of the scan).
+	_, resourceLists, err := c.clientset.Discovery().ServerGroupsAndResources()
+	if err != nil {
+		c.log.Info("partial API discovery", zap.String("cluster_id", clusterID), zap.Error(err))
+	}
+
+	// Index served resources (group/version/kind -> plural resource name).
+	type served struct{ resource string }
+	servedByGVK := map[schema.GroupVersionKind]served{}
+	for _, rl := range resourceLists {
+		gv, perr := schema.ParseGroupVersion(rl.GroupVersion)
+		if perr != nil {
+			continue
+		}
+		for _, r := range rl.APIResources {
+			if strings.Contains(r.Name, "/") {
+				continue // skip subresources like pods/status
+			}
+			servedByGVK[schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: r.Kind}] = served{resource: r.Name}
+		}
+	}
+
+	for _, d := range analysis.DeprecationRegistry() {
+		key := schema.GroupVersionKind{Group: d.Group, Version: d.Version, Kind: d.Kind}
+		s, ok := servedByGVK[key]
+		if !ok {
+			continue
+		}
+		api := analysis.ServedAPI{Group: d.Group, Version: d.Version, Kind: d.Kind}
+		if count, known := c.countInstances(ctx, schema.GroupVersionResource{Group: d.Group, Version: d.Version, Resource: s.resource}); known {
+			api.InstanceCount = count
+			api.InstancesKnown = true
+		}
+		snap.ServedAPIs = append(snap.ServedAPIs, api)
+	}
+	return snap
+}
+
+// countInstances lists a GVR via the dynamic client and returns the instance
+// count. A false second return means the count is unknown (listing failed).
+func (c *Client) countInstances(ctx context.Context, gvr schema.GroupVersionResource) (int, bool) {
+	if c.dynamic == nil {
+		return 0, false
+	}
+	list, err := c.dynamic.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1000})
+	if err != nil {
+		c.log.Debug("counting instances failed", zap.String("gvr", gvr.String()), zap.Error(err))
+		return 0, false
+	}
+	return len(list.Items), true
 }
 
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.

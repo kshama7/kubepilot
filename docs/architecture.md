@@ -166,6 +166,32 @@ Single-replica workloads are not also nagged for a missing PDB or spread policy
 (they run to completion). A blocking PDB counts as coverage — it reports
 `PDBBlocksVoluntaryDisruption`, never `MissingPodDisruptionBudget`.
 
+## Upgrade readiness (M5)
+
+`analysis.AnalyzeUpgrade` compares the APIs a cluster *currently serves* against
+a curated deprecation registry for a target version. The registry is
+deterministic data — every entry maps to an upstream Kubernetes API removal
+(extensions/v1beta1 Ingress → 1.22, policy/v1beta1 PDB → 1.25, the API
+Priority & Fairness betas → 1.29/1.32, etc.).
+
+| Verdict          | Rule                                                         | Severity |
+|------------------|-------------------------------------------------------------|----------|
+| `RemovedAPI`     | served API whose `removedIn` ≤ target version              | critical |
+| `DeprecatedAPI`  | served API deprecated by target but not yet removed        | warning  |
+
+**Findings are grounded in real cluster state, two ways.** The collector uses
+*discovery* (`ServerGroupsAndResources`) to learn which registry GVKs the
+cluster actually serves, then the *dynamic client* to count live instances of
+each (`12 objects use policy/v1beta1 PodDisruptionBudget`). A served-but-fine API
+(not deprecated by the target) yields no finding. Instance counts feed
+`affectedInstances`; when a count can't be obtained it is omitted rather than
+guessed.
+
+Target selection: explicit `?target=1.25`, else the next minor after the
+cluster's reported version. Version parsing tolerates distro suffixes
+(`1.27.3-gke.100`, `1.28.2+k3s1`). `upgradeSafe` is true when no *removed* API is
+in use for the target — deprecations alone don't block an upgrade.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -187,6 +213,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/workloads`   | Run the Workload analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/resources`   | Run the Resource analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/reliability` | Run the Reliability analyzer (`?namespace=` optional) |
+| GET    | `/api/v1/clusters/{id}/upgrade`     | Run the Upgrade Readiness analyzer (`?target=1.25` optional) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns
