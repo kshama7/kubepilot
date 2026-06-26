@@ -6,6 +6,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,7 +25,29 @@ type Config struct {
 	LogFormat string
 	// ShutdownTimeout bounds graceful shutdown of in-flight requests.
 	ShutdownTimeout time.Duration
+
+	// Prometheus configures the optional metrics backend used by capacity
+	// planning. When PrometheusURL is empty, capacity analysis falls back to
+	// API-server-only data (density and commitment) with no utilization trends.
+	Prometheus PrometheusConfig
 }
+
+// PrometheusConfig holds the capacity-planning Prometheus settings. The PromQL
+// queries return a per-node utilization fraction labeled by `node`; defaults
+// target node-exporter as deployed by kube-prometheus-stack. Override them to
+// match a different metrics stack.
+type PrometheusConfig struct {
+	URL           string
+	LookbackHours float64
+	StepMinutes   int
+	CPUQuery      string
+	MemQuery      string
+}
+
+const (
+	defaultCPUQuery = `1 - avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))`
+	defaultMemQuery = `1 - avg by (node) (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)`
+)
 
 // Load reads configuration from the environment, applying defaults.
 func Load() Config {
@@ -34,7 +57,32 @@ func Load() Config {
 		LogLevel:        strings.ToLower(env("KUBEPILOT_LOG_LEVEL", "info")),
 		LogFormat:       strings.ToLower(env("KUBEPILOT_LOG_FORMAT", "json")),
 		ShutdownTimeout: envDuration("KUBEPILOT_SHUTDOWN_TIMEOUT", 15*time.Second),
+		Prometheus: PrometheusConfig{
+			URL:           os.Getenv("KUBEPILOT_PROMETHEUS_URL"),
+			LookbackHours: envFloat("KUBEPILOT_PROMETHEUS_LOOKBACK_HOURS", 6),
+			StepMinutes:   envInt("KUBEPILOT_PROMETHEUS_STEP_MINUTES", 30),
+			CPUQuery:      env("KUBEPILOT_PROMETHEUS_CPU_QUERY", defaultCPUQuery),
+			MemQuery:      env("KUBEPILOT_PROMETHEUS_MEM_QUERY", defaultMemQuery),
+		},
 	}
+}
+
+func envFloat(key string, def float64) float64 {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return def
 }
 
 func env(key, def string) string {

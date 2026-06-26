@@ -4,10 +4,10 @@ A Kubernetes reliability platform that answers on-call questions with
 **deterministic, rule-based analysis**. Rules generate every finding and score;
 the AI layer only explains them. No model freestyling, no vanity metrics.
 
-> Status: **Milestone 7 of 10** — Cluster Health + Workload + Resource +
-> Reliability + Upgrade Readiness + GitOps + Security analyzers. Subsequent
-> milestones add the capacity analyzer, the Next.js dashboard, the AI explanation
-> layer, and production hardening.
+> Status: **Milestone 8 of 10** — all eight analyzers complete (Cluster Health,
+> Workload, Resource, Reliability, Upgrade Readiness, GitOps, Security, Capacity).
+> Subsequent milestones add the Next.js dashboard, the AI explanation layer, and
+> production hardening.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ rule engine is fully unit-tested without a cluster. See
 | Upgrade         | Which deprecated/removed APIs block the next version?      | ✅ M5          |
 | GitOps          | What's drifted or out-of-sync in ArgoCD?                   | ✅ M6          |
 | Security        | Privileged containers, missing contexts, secrets in env?   | ✅ M7          |
-| Capacity        | Node utilization trends and saturation prediction          | ⏳ later       |
+| Capacity        | Node utilization trends and saturation prediction          | ✅ M8          |
 
 ## Cluster Health scoring
 
@@ -75,6 +75,7 @@ curl -s "localhost:8080/api/v1/clusters/my-cluster/reliability?namespace=default
 curl -s "localhost:8080/api/v1/clusters/my-cluster/upgrade?target=1.25" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/gitops" | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/security?namespace=default" | jq
+curl -s "localhost:8080/api/v1/clusters/my-cluster/capacity" | jq   # set KUBEPILOT_PROMETHEUS_URL for trends
 
 # 3. (optional) spin up a throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build

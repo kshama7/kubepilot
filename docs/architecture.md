@@ -238,6 +238,36 @@ only fires on an *inline* value — a `valueFrom: secretKeyRef` is the correct
 pattern and is never flagged. Hardening nudges are info-level so they never drown
 out a real critical.
 
+## Capacity planning (M8)
+
+`analysis.AnalyzeCapacity` evaluates per-node headroom and predicts saturation.
+Density and commitment come from the **Kubernetes API** (so the module works on
+any cluster); utilization *trends* come from **Prometheus** when configured.
+
+| Issue type                    | Detection rule                                                  | Severity         |
+|-------------------------------|----------------------------------------------------------------|------------------|
+| `HighPodDensity`              | pods / maxPods ≥ 90%                                            | warning          |
+| `HighCPUCommitment`           | CPU requests / allocatable ≥ 90% (≥ 100% critical)            | warning/critical |
+| `HighMemoryCommitment`        | memory requests / allocatable ≥ 90% (≥ 100% critical)         | warning/critical |
+| `HighCPUUtilization`          | live CPU utilization ≥ 85% (≥ 95% critical)                   | warning/critical |
+| `HighMemoryUtilization`       | live memory utilization ≥ 85% (≥ 95% critical)               | warning/critical |
+| `CPUSaturationPredicted`      | linear trend reaches 90% within 7 days (≤ 2 days critical)    | warning/critical |
+| `MemorySaturationPredicted`   | same, for memory                                              | warning/critical |
+
+**Saturation prediction is least-squares, and it lives in the pure analyzer.**
+`linearSlopePerHour` fits a line to the utilization series; `daysToThreshold`
+projects when it crosses 90%. Both are unit-tested with synthetic series — no
+live Prometheus needed to verify the math. The report surfaces
+`minDaysToCpuSaturation` / `minDaysToMemSaturation` across the fleet (`-1` when
+nothing is trending up).
+
+**Prometheus is optional and configurable.** Set `KUBEPILOT_PROMETHEUS_URL` to
+enable utilization/saturation findings; the PromQL is overridable
+(`KUBEPILOT_PROMETHEUS_CPU_QUERY` / `_MEM_QUERY`), defaulting to node-exporter
+expressions that return a per-node fraction labeled `node` (as kube-prometheus-
+stack exposes). Without it, `prometheusAvailable` is false and only density and
+commitment are reported.
+
 ## Observability (M1)
 
 Exposed at `/metrics` on a private registry:
@@ -262,6 +292,7 @@ Exposed at `/metrics` on a private registry:
 | GET    | `/api/v1/clusters/{id}/upgrade`     | Run the Upgrade Readiness analyzer (`?target=1.25` optional) |
 | GET    | `/api/v1/clusters/{id}/gitops`      | Run the GitOps (ArgoCD) analyzer (`?namespace=` optional) |
 | GET    | `/api/v1/clusters/{id}/security`    | Run the Security analyzer (`?namespace=` optional) |
+| GET    | `/api/v1/clusters/{id}/capacity`    | Run the Capacity Planning analyzer (cluster-wide) |
 
 For cluster health, an unreachable cluster is a **finding**: the endpoint
 returns `200` with a low-scoring report. The workload endpoint instead returns

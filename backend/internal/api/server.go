@@ -27,6 +27,7 @@ type ClusterCollector interface {
 	CollectUpgradeSnapshot(ctx context.Context, clusterID string) analysis.UpgradeSnapshot
 	CollectGitOpsSnapshot(ctx context.Context, clusterID, namespace string) analysis.GitOpsSnapshot
 	CollectSecuritySnapshot(ctx context.Context, clusterID, namespace string) analysis.SecuritySnapshot
+	CollectCapacitySnapshot(ctx context.Context, clusterID string) analysis.CapacitySnapshot
 }
 
 // Server holds handler dependencies. collector may be nil when no kubeconfig was
@@ -64,6 +65,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/clusters/{id}/upgrade", s.handleUpgrade)
 		r.Get("/clusters/{id}/gitops", s.handleGitOps)
 		r.Get("/clusters/{id}/security", s.handleSecurity)
+		r.Get("/clusters/{id}/capacity", s.handleCapacity)
 	})
 
 	return r
@@ -357,6 +359,45 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		zap.String("namespace", namespace),
 		zap.Int("pods", report.Summary.TotalPods),
 		zap.Int("privileged_pods", report.Summary.PrivilegedPods),
+		zap.Int("findings", len(report.Findings)),
+		zap.Duration("duration", elapsed),
+	)
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
+	clusterID := chi.URLParam(r, "id")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster id is required")
+		return
+	}
+	if s.collector == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"no Kubernetes client configured; set KUBEPILOT_KUBECONFIG or run in-cluster")
+		return
+	}
+
+	start := time.Now()
+	snap := s.collector.CollectCapacitySnapshot(r.Context(), clusterID)
+	if !snap.APIServerReachable {
+		s.metrics.AnalysisDuration.WithLabelValues("capacity", "error").Observe(time.Since(start).Seconds())
+		writeError(w, http.StatusBadGateway, "could not list nodes: "+snap.APIServerError)
+		return
+	}
+	report := analysis.AnalyzeCapacity(snap)
+	elapsed := time.Since(start)
+
+	s.metrics.AnalysisDuration.WithLabelValues("capacity", "success").Observe(elapsed.Seconds())
+	for _, f := range report.Findings {
+		s.metrics.RecommendationsTotal.WithLabelValues("capacity", string(f.Severity)).Inc()
+	}
+
+	s.log.Info("capacity analyzed",
+		zap.String("cluster_id", clusterID),
+		zap.Int("nodes", report.Summary.TotalNodes),
+		zap.Bool("prometheus_available", report.Summary.PrometheusAvailable),
+		zap.Int("nodes_near_saturation", report.Summary.NodesNearSaturation),
 		zap.Int("findings", len(report.Findings)),
 		zap.Duration("duration", elapsed),
 	)

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	promapi "github.com/prometheus/client_golang/api"
+	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
+	"github.com/prometheus/common/model"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -26,6 +29,15 @@ import (
 	"github.com/kshama7/kubepilot/backend/internal/analysis"
 )
 
+// PrometheusOptions configures the optional capacity-planning metrics backend.
+type PrometheusOptions struct {
+	URL           string
+	LookbackHours float64
+	StepMinutes   int
+	CPUQuery      string
+	MemQuery      string
+}
+
 // argoApplicationGVR is the ArgoCD Application custom resource. KubePilot reads
 // it via the dynamic client rather than vendoring the (very heavy) argo-cd Go
 // module — see docs/tradeoffs.md.
@@ -42,6 +54,8 @@ type Client struct {
 	clientset kubernetes.Interface
 	metrics   metricsclient.Interface
 	dynamic   dynamic.Interface
+	prom      promv1.API
+	promOpts  PrometheusOptions
 	log       *zap.Logger
 }
 
@@ -52,7 +66,7 @@ type Client struct {
 //
 // A non-nil error means we could not even construct a REST config; it does not
 // imply the API server is reachable. Reachability is checked at analysis time.
-func NewClient(log *zap.Logger, kubeconfigPath string) (*Client, error) {
+func NewClient(log *zap.Logger, kubeconfigPath string, prom PrometheusOptions) (*Client, error) {
 	cfg, source, err := restConfig(kubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("build rest config: %w", err)
@@ -77,8 +91,21 @@ func NewClient(log *zap.Logger, kubeconfigPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build dynamic client: %w", err)
 	}
+
+	client := &Client{clientset: cs, metrics: mc, dynamic: dyn, promOpts: prom, log: log}
+
+	// Prometheus is optional; only build the API client when a URL is configured.
+	if prom.URL != "" {
+		pc, err := promapi.NewClient(promapi.Config{Address: prom.URL})
+		if err != nil {
+			return nil, fmt.Errorf("build prometheus client: %w", err)
+		}
+		client.prom = promv1.NewAPI(pc)
+		log.Info("prometheus enabled for capacity planning", zap.String("url", prom.URL))
+	}
+
 	log.Info("kubernetes client initialized", zap.String("config_source", source), zap.String("host", cfg.Host))
-	return &Client{clientset: cs, metrics: mc, dynamic: dyn, log: log}, nil
+	return client, nil
 }
 
 // NewClientFromInterface wraps an existing clientset. Used in tests with a fake.
@@ -706,6 +733,146 @@ func containerSecurityFrom(c *corev1.Container, init bool) analysis.ContainerSec
 		})
 	}
 	return cs
+}
+
+// CollectCapacitySnapshot builds per-node capacity from the Kubernetes API
+// (allocatable, pod density, committed requests) and, when Prometheus is
+// configured, attaches CPU/memory utilization series for trend and saturation
+// analysis. Without Prometheus it still returns density and commitment data.
+func (c *Client) CollectCapacitySnapshot(ctx context.Context, clusterID string) analysis.CapacitySnapshot {
+	snap := analysis.CapacitySnapshot{
+		ClusterID:     clusterID,
+		LookbackHours: c.promOpts.LookbackHours,
+		CollectedAt:   time.Now().UTC(),
+	}
+
+	nodeList, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing nodes failed", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	podList, err := c.clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		c.log.Warn("listing pods failed", zap.String("cluster_id", clusterID), zap.Error(err))
+		snap.APIServerReachable = false
+		snap.APIServerError = err.Error()
+		return snap
+	}
+	snap.APIServerReachable = true
+
+	// Aggregate live pods and their requests per node.
+	type agg struct {
+		count               int
+		reqCPUMilli, reqMem int64
+	}
+	byNode := map[string]*agg{}
+	for i := range podList.Items {
+		p := &podList.Items[i]
+		if p.Spec.NodeName == "" || isTerminal(p.Status.Phase) {
+			continue
+		}
+		a := byNode[p.Spec.NodeName]
+		if a == nil {
+			a = &agg{}
+			byNode[p.Spec.NodeName] = a
+		}
+		a.count++
+		cpu, mem := podRequests(p)
+		a.reqCPUMilli += cpu
+		a.reqMem += mem
+	}
+
+	cpuSeries, memSeries := c.collectUtilizationSeries(ctx)
+	snap.PrometheusAvailable = cpuSeries != nil || memSeries != nil
+
+	for i := range nodeList.Items {
+		n := &nodeList.Items[i]
+		nc := analysis.NodeCapacity{
+			Name:                n.Name,
+			AllocatableCPUMilli: n.Status.Allocatable.Cpu().MilliValue(),
+			AllocatableMemBytes: n.Status.Allocatable.Memory().Value(),
+			MaxPods:             int(n.Status.Allocatable.Pods().Value()),
+		}
+		if a := byNode[n.Name]; a != nil {
+			nc.PodCount = a.count
+			nc.RequestedCPUMilli = a.reqCPUMilli
+			nc.RequestedMemBytes = a.reqMem
+		}
+		if cpuSeries != nil || memSeries != nil {
+			nc.CPUUtilSeries = cpuSeries[n.Name]
+			nc.MemUtilSeries = memSeries[n.Name]
+			nc.HasUtilization = len(nc.CPUUtilSeries) > 0 || len(nc.MemUtilSeries) > 0
+		}
+		snap.Nodes = append(snap.Nodes, nc)
+	}
+	return snap
+}
+
+func isTerminal(phase corev1.PodPhase) bool {
+	return phase == corev1.PodSucceeded || phase == corev1.PodFailed
+}
+
+func podRequests(p *corev1.Pod) (cpuMilli, memBytes int64) {
+	for i := range p.Spec.Containers {
+		req := p.Spec.Containers[i].Resources.Requests
+		cpuMilli += req.Cpu().MilliValue()
+		memBytes += req.Memory().Value()
+	}
+	return cpuMilli, memBytes
+}
+
+// collectUtilizationSeries runs the configured CPU and memory range queries and
+// returns per-node series. A nil map means Prometheus is unconfigured or the
+// query failed — capacity analysis then degrades to API-only data.
+func (c *Client) collectUtilizationSeries(ctx context.Context) (cpu, mem map[string][]analysis.Sample) {
+	if c.prom == nil {
+		return nil, nil
+	}
+	cpu = c.rangeByNode(ctx, c.promOpts.CPUQuery)
+	mem = c.rangeByNode(ctx, c.promOpts.MemQuery)
+	return cpu, mem
+}
+
+func (c *Client) rangeByNode(ctx context.Context, query string) map[string][]analysis.Sample {
+	if query == "" {
+		return nil
+	}
+	step := time.Duration(c.promOpts.StepMinutes) * time.Minute
+	if step <= 0 {
+		step = 30 * time.Minute
+	}
+	r := promv1.Range{
+		Start: time.Now().Add(-time.Duration(c.promOpts.LookbackHours * float64(time.Hour))),
+		End:   time.Now(),
+		Step:  step,
+	}
+	value, warnings, err := c.prom.QueryRange(ctx, query, r)
+	if err != nil {
+		c.log.Info("prometheus range query failed", zap.String("query", query), zap.Error(err))
+		return nil
+	}
+	if len(warnings) > 0 {
+		c.log.Debug("prometheus query warnings", zap.Strings("warnings", warnings))
+	}
+	matrix, ok := value.(model.Matrix)
+	if !ok {
+		return nil
+	}
+	out := map[string][]analysis.Sample{}
+	for _, stream := range matrix {
+		node := string(stream.Metric["node"])
+		if node == "" {
+			continue
+		}
+		samples := make([]analysis.Sample, 0, len(stream.Values))
+		for _, sp := range stream.Values {
+			samples = append(samples, analysis.Sample{TS: sp.Timestamp.Time(), Value: float64(sp.Value)})
+		}
+		out[node] = samples
+	}
+	return out
 }
 
 // nodeStatusFrom distills a corev1.Node into the scoring-relevant fields.

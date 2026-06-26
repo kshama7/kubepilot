@@ -94,7 +94,14 @@ func run() error {
 	// /healthz and /metrics, and analysis endpoints return 503 until a cluster
 	// is configured.
 	var collector api.ClusterCollector
-	if client, err := k8s.NewClient(logger.Named("k8s"), cfg.Kubeconfig); err != nil {
+	promOpts := k8s.PrometheusOptions{
+		URL:           cfg.Prometheus.URL,
+		LookbackHours: cfg.Prometheus.LookbackHours,
+		StepMinutes:   cfg.Prometheus.StepMinutes,
+		CPUQuery:      cfg.Prometheus.CPUQuery,
+		MemQuery:      cfg.Prometheus.MemQuery,
+	}
+	if client, err := k8s.NewClient(logger.Named("k8s"), cfg.Kubeconfig, promOpts); err != nil {
 		logger.Warn("kubernetes client unavailable; analysis endpoints will return 503",
 			zap.Error(err))
 	} else {
