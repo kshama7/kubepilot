@@ -1,13 +1,25 @@
 # KubePilot
 
-A Kubernetes reliability platform that answers on-call questions with
-**deterministic, rule-based analysis**. Rules generate every finding and score;
-the AI layer only explains them. No model freestyling, no vanity metrics.
+[![CI](https://github.com/kshama7/kubepilot/actions/workflows/ci.yml/badge.svg)](https://github.com/kshama7/kubepilot/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)](backend/go.mod)
+[![Dashboard](https://img.shields.io/badge/dashboard-Next.js%2014-000000?logo=next.js&logoColor=white)](frontend)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> Status: **complete** — all 10 build milestones plus the Next.js dashboard:
-> eight deterministic analyzers, the AI explanation layer, production hardening
-> (Helm, Prometheus/Grafana, OpenTelemetry, CI), and a dark terminal-style
-> frontend over the API. See [docs/roadmap.md](docs/roadmap.md) for what's next.
+A Kubernetes reliability platform that answers on-call questions with
+**deterministic, rule-based analysis**. Eight Go rule engines score and triage
+a live cluster; Claude only explains and prioritizes the findings those rules
+already produced — it cannot invent one. No model freestyling, no vanity
+metrics, no fake data.
+
+> **Status: complete.** All 10 build milestones plus the dashboard: eight
+> deterministic analyzers, the AI explanation layer, production hardening
+> (Helm, Prometheus/Grafana, OpenTelemetry, CI), and a Next.js frontend. See
+> [docs/roadmap.md](docs/roadmap.md) for what's next.
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="KubePilot dashboard overview — cluster health gauge and per-analyzer finding cards" width="49%" />
+  <img src="docs/screenshots/cluster_health.png" alt="Cluster Health detail — per-rule severity, penalty, and message breakdown" width="49%" />
+</p>
 
 ## Architecture
 
@@ -28,29 +40,63 @@ the AI layer only explains them. No model freestyling, no vanity metrics.
 ```
 
 Collection (I/O) and scoring (pure functions) are separate packages, so the
-rule engine is fully unit-tested without a cluster. See
-[docs/architecture.md](docs/architecture.md),
+rule engine is fully unit-tested without a cluster — **72 tests, no kind, no
+envtest, no mocked Kubernetes API.** See [docs/architecture.md](docs/architecture.md),
 [docs/analysis-pipeline.md](docs/analysis-pipeline.md), and
 [docs/rule-engine.md](docs/rule-engine.md).
 
 ## Supported analyses
 
-| Module          | Question it answers                                        | Status        |
-|-----------------|------------------------------------------------------------|---------------|
-| Cluster Health  | Is the control plane reachable and are nodes healthy?      | ✅ M1         |
-| Workload        | What's crashlooping, OOMKilled, pending, or restart-storming? | ✅ M2      |
-| Resource        | Where are we over-provisioned or missing requests/limits?  | ✅ M3          |
-| Reliability     | Do workloads have PDBs, probes, replicas, anti-affinity?   | ✅ M4          |
-| Upgrade         | Which deprecated/removed APIs block the next version?      | ✅ M5          |
-| GitOps          | What's drifted or out-of-sync in ArgoCD?                   | ✅ M6          |
-| Security        | Privileged containers, missing contexts, secrets in env?   | ✅ M7          |
-| Capacity        | Node utilization trends and saturation prediction          | ✅ M8          |
-| AI explanation  | Plain-English explanation + remediation over the above     | ✅ M9          |
+| Module          | Question it answers                                        | Status |
+|-----------------|--------------------------------------------------------------|--------|
+| Cluster Health  | Is the control plane reachable and are nodes healthy?         | ✅ |
+| Workload        | What's crashlooping, OOMKilled, pending, or restart-storming? | ✅ |
+| Resource        | Where are we over-provisioned or missing requests/limits?     | ✅ |
+| Reliability     | Do workloads have PDBs, probes, replicas, anti-affinity?      | ✅ |
+| Upgrade         | Which deprecated/removed APIs block the next version?         | ✅ |
+| GitOps          | What's drifted or out-of-sync in ArgoCD?                       | ✅ |
+| Security        | Privileged containers, missing contexts, secrets in env?      | ✅ |
+| Capacity        | Node utilization trends and saturation prediction              | ✅ |
+| AI explanation  | Plain-English explanation + remediation over the above        | ✅ |
 
-All analyzers share one finding model (type · severity · resource · message) and
-are exposed at `GET /api/v1/clusters/{id}/<analyzer>`. The AI layer is
+All analyzers share one finding model (`type · severity · resource · message`)
+and are exposed at `GET /api/v1/clusters/{id}/<analyzer>`. The AI layer is
 `?analyzer=<name>` on `/explain`. Full endpoint table in
 [docs/architecture.md](docs/architecture.md).
+
+## Real output, no cherry-picking
+
+This is the actual response from `GET /api/v1/clusters/prod-east/health` run
+against an unreachable control plane — the honest case, not a happy-path demo.
+An unreachable cluster is reported as a low-scoring **finding**, not a 500:
+
+```json
+{
+  "clusterId": "prod-east",
+  "score": 30,
+  "status": "critical",
+  "summary": { "totalNodes": 0, "readyNodes": 0, "failedChecks": 2 },
+  "checks": [
+    {
+      "id": "control-plane-reachable",
+      "passed": false,
+      "severity": "critical",
+      "message": "Kubernetes API server is unreachable",
+      "weight": 35,
+      "penalty": 35,
+      "details": { "error": "the server has asked for the client to provide credentials" }
+    },
+    {
+      "id": "node-readiness",
+      "passed": false,
+      "severity": "critical",
+      "message": "no nodes reported by the cluster",
+      "weight": 35,
+      "penalty": 35
+    }
+  ]
+}
+```
 
 ## Cluster Health scoring
 
@@ -62,8 +108,7 @@ Four weighted checks (summing to 100) over a cluster snapshot:
 - **Schedulability** (10) — cordoned nodes, capped at warning
 
 `score = clamp(100 − Σ penalties, 0, 100)` → `healthy ≥ 90`, `degraded ≥ 70`,
-else `critical`. An unreachable cluster is reported as a low-scoring finding, not
-an HTTP error.
+else `critical`.
 
 ## Tech choices & tradeoffs
 
@@ -75,6 +120,10 @@ an HTTP error.
 | chi router                     | Stdlib-compatible, minimal, idiomatic `net/http` middleware                 |
 | Distroless runtime image       | Small attack surface; `--healthcheck` self-probe avoids shipping curl       |
 | Boot without a cluster         | API serves health/metrics and degrades analysis endpoints to 503           |
+| ArgoCD via dynamic client      | Avoids vendoring the heavy argo-cd Go module for a handful of status fields |
+
+Full reasoning, including what was deliberately *not* built and why, in
+[docs/tradeoffs.md](docs/tradeoffs.md).
 
 ## Quickstart
 
@@ -86,16 +135,9 @@ cd backend && go run ./cmd/api
 curl -s localhost:8080/healthz
 curl -s localhost:8080/api/v1/clusters/my-cluster/health | jq
 curl -s "localhost:8080/api/v1/clusters/my-cluster/workloads?namespace=default" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/resources?namespace=default" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/reliability?namespace=default" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/upgrade?target=1.25" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/gitops" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/security?namespace=default" | jq
-curl -s "localhost:8080/api/v1/clusters/my-cluster/capacity" | jq   # set KUBEPILOT_PROMETHEUS_URL for trends
-# AI explanation over deterministic findings — set KUBEPILOT_ANTHROPIC_API_KEY first
-curl -s "localhost:8080/api/v1/clusters/my-cluster/explain?analyzer=workload&namespace=prod" | jq
+curl -s "localhost:8080/api/v1/clusters/my-cluster/explain?analyzer=workload" | jq  # needs KUBEPILOT_ANTHROPIC_API_KEY
 
-# 3. (optional) spin up a throwaway local cluster — requires `kind`
+# 3. (optional) throwaway local cluster — requires `kind`
 ./scripts/kind-up.sh    # then: docker compose up --build
 
 # 4. (optional) full observability stack — Prometheus + Grafana dashboard
@@ -141,4 +183,4 @@ kubepilot/
 
 ## License
 
-TBD.
+[MIT](LICENSE)
